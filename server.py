@@ -52,6 +52,7 @@ from tools import (  # noqa: E402
     CodeReviewTool,
     ConsensusTool,
     DebugIssueTool,
+    ListModelsTool,
     ThinkDeepTool,
 )
 from tools.models import ToolOutput  # noqa: E402
@@ -250,6 +251,7 @@ TOOLS = {
     "consensus": ConsensusTool(),
     "codereview": CodeReviewTool(),
     "debug": DebugIssueTool(),
+    "listmodels": ListModelsTool(),
     "thinkdeep": ThinkDeepTool(),
 }
 TOOLS = filter_disabled_tools(TOOLS)

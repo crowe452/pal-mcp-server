@@ -48,24 +48,11 @@ from config import (  # noqa: E402
     __version__,
 )
 from tools import (  # noqa: E402
-    AnalyzeTool,
-    ChallengeTool,
     ChatTool,
-    CLinkTool,
     CodeReviewTool,
     ConsensusTool,
     DebugIssueTool,
-    DocgenTool,
-    ListModelsTool,
-    LookupTool,
-    PlannerTool,
-    PrecommitTool,
-    RefactorTool,
-    SecauditTool,
-    TestGenTool,
     ThinkDeepTool,
-    TracerTool,
-    VersionTool,
 )
 from tools.models import ToolOutput  # noqa: E402
 from tools.shared.exceptions import ToolExecutionError  # noqa: E402
@@ -259,24 +246,11 @@ def filter_disabled_tools(all_tools: dict[str, Any]) -> dict[str, Any]:
 # Each tool provides specialized functionality for different development tasks
 # Tools are instantiated once and reused across requests (stateless design)
 TOOLS = {
-    "chat": ChatTool(),  # Interactive development chat and brainstorming
-    "clink": CLinkTool(),  # Bridge requests to configured AI CLIs
-    "thinkdeep": ThinkDeepTool(),  # Step-by-step deep thinking workflow with expert analysis
-    "planner": PlannerTool(),  # Interactive sequential planner using workflow architecture
-    "consensus": ConsensusTool(),  # Step-by-step consensus workflow with multi-model analysis
-    "codereview": CodeReviewTool(),  # Comprehensive step-by-step code review workflow with expert analysis
-    "precommit": PrecommitTool(),  # Step-by-step pre-commit validation workflow
-    "debug": DebugIssueTool(),  # Root cause analysis and debugging assistance
-    "secaudit": SecauditTool(),  # Comprehensive security audit with OWASP Top 10 and compliance coverage
-    "docgen": DocgenTool(),  # Step-by-step documentation generation with complexity analysis
-    "analyze": AnalyzeTool(),  # General-purpose file and code analysis
-    "refactor": RefactorTool(),  # Step-by-step refactoring analysis workflow with expert validation
-    "tracer": TracerTool(),  # Static call path prediction and control flow analysis
-    "testgen": TestGenTool(),  # Step-by-step test generation workflow with expert validation
-    "challenge": ChallengeTool(),  # Critical challenge prompt wrapper to avoid automatic agreement
-    "apilookup": LookupTool(),  # Quick web/API lookup instructions
-    "listmodels": ListModelsTool(),  # List all available AI models by provider
-    "version": VersionTool(),  # Display server version and system information
+    "chat": ChatTool(),
+    "consensus": ConsensusTool(),
+    "codereview": CodeReviewTool(),
+    "debug": DebugIssueTool(),
+    "thinkdeep": ThinkDeepTool(),
 }
 TOOLS = filter_disabled_tools(TOOLS)
 
@@ -286,11 +260,6 @@ PROMPT_TEMPLATES = {
         "name": "chat",
         "description": "Chat and brainstorm ideas",
         "template": "Chat with {model} about this",
-    },
-    "clink": {
-        "name": "clink",
-        "description": "Forward a request to a configured AI CLI (e.g., Gemini)",
-        "template": "Use clink with cli_name=<cli> to run this prompt",
     },
     "thinkdeep": {
         "name": "thinkdeeper",
@@ -352,25 +321,10 @@ PROMPT_TEMPLATES = {
         "description": "Generate comprehensive tests",
         "template": "Generate comprehensive tests with {model}",
     },
-    "challenge": {
-        "name": "challenge",
-        "description": "Challenge a statement critically without automatic agreement",
-        "template": "Challenge this statement critically",
-    },
     "apilookup": {
         "name": "apilookup",
         "description": "Look up the latest API or SDK information",
         "template": "Lookup latest API docs for {model}",
-    },
-    "listmodels": {
-        "name": "listmodels",
-        "description": "List available AI models",
-        "template": "List all available models",
-    },
-    "version": {
-        "name": "version",
-        "description": "Show server version and system information",
-        "template": "Show PAL MCP Server version",
     },
 }
 

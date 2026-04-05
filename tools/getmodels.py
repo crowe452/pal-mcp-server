@@ -122,74 +122,79 @@ class GetModelsTool(BaseTool):
                     pass
             return []
 
-    # Models that are NOT general-purpose reasoning/coding models
-    EXCLUDE_PATTERNS = [
-        "lyria", "imagen", "music", "audio", "tts", "stt", "whisper",
+    # Exclude non-reasoning, non-flagship models
+    # NOTE: These are matched as substrings, so be careful with short patterns.
+    # "mini" can't be used because it matches "ge-mini". Use the regex excluder instead.
+    EXCLUDE_SUBSTRINGS = [
+        "lyria", "imagen", "music", "audio-", "tts", "stt", "whisper",
         "embed", "moderation", "dall-e", "stable-diffusion",
-        "auto", "router", "openrouter/",  # meta/routing models
-        "vision-only", "ocr",
-        "flash", "lite", "nano", "mini",  # not flagship
-        "4o", "4-turbo",  # old OpenAI generation
+        "/auto", "router", "openrouter/",
+        "vision-only", "ocr", "-image",
+        "-flash", "-lite", "-nano",  # not flagship (dash prefix avoids false positives)
+        "-4o", "4-turbo", "3.5-turbo",  # old OpenAI
+        "gpt-4-", "gpt-3.",  # old generations
+        "grok-3-", "grok-3-", "grok-code",  # old xAI
+        "gemma",  # open weights, not Gemini
+        "-chat", "-codex",  # variant suffixes
+        ":free", ":thinking", ":extended",
+        "-fast",  # speed variants
+        "multi-agent",  # specialized variant
+        "haiku", "sonnet",  # not flagship Anthropic
+        "customtools",  # Google variant suffix
+        "-oss-",  # open source variants
+    ]
+    # Regex patterns for more precise matching
+    EXCLUDE_REGEX = [
+        r"-mini(?:\b|$|-)",  # "mini" but NOT "gemini"
     ]
 
-    # Model family keywords that indicate flagship reasoning models
-    FLAGSHIP_KEYWORDS = {
-        "google": ["gemini"],
-        "x-ai": ["grok"],
-        "openai": ["gpt", "o3", "o4"],
-        "anthropic": ["claude"],
-    }
-
     def _pick_frontier(self, models: list[dict]) -> list[dict]:
-        """Pick the single best model from each core provider + one wildcard."""
+        """Pick the single best model from each core provider + one wildcard.
+
+        Strategy: exclude everything that isn't a flagship, then pick highest version.
+        """
+        import re
 
         def is_excluded(mid: str) -> bool:
             mid_lower = mid.lower()
-            return any(pat in mid_lower for pat in self.EXCLUDE_PATTERNS)
+            if any(pat in mid_lower for pat in self.EXCLUDE_SUBSTRINGS):
+                return True
+            if any(re.search(pat, mid_lower) for pat in self.EXCLUDE_REGEX):
+                return True
+            return False
 
-        def is_flagship_family(mid: str, provider_prefix: str) -> bool:
-            """Check if model belongs to the flagship family for this provider."""
-            mid_lower = mid.lower()
-            keywords = self.FLAGSHIP_KEYWORDS.get(provider_prefix, [])
-            return any(kw in mid_lower for kw in keywords)
-
-        def score(m: dict) -> float:
-            ctx = m.get("context_length", 0)
-            created = m.get("created", 0)
-            name = m.get("id", "").lower()
-            s = 0.0
-
-            # Context window (normalized)
-            s += ctx / 100_000
-
-            # Recency bonus
-            if created:
-                s += created / 1_000_000_000
-
-            # "opus" is flagship for Anthropic
-            if "opus" in name:
-                s += 20
-
-            # "pro" bonus (but not "preview" penalty — previews are often the latest)
-            if "pro" in name:
-                s += 10
-
-            # Penalty for free tier
-            if "free" in name:
-                s -= 20
-
-            # Version scoring: extract model version (not dates)
-            # Match patterns like "gpt-5.4", "gemini-3.1", "grok-4.20", "claude-opus-4.6"
-            # Skip date-like patterns (2024-11-20)
-            import re
-            # Look for version after the model family name (e.g., "-5.4", "-3.1", "-4.20")
-            ver_match = re.search(r"(?:gpt-?|gemini-?|grok-?|claude-\w+-?|deepseek-\w+-?)(\d+\.?\d*)", name)
-            if ver_match:
+        def extract_version(mid: str) -> float:
+            """Extract the primary version number from a model ID."""
+            # Match: gemini-3.1, gpt-5.4, grok-4.20, claude-opus-4.6
+            name = mid.split("/")[-1]
+            match = re.search(r"(\d+\.?\d*)", name)
+            if match:
                 try:
-                    ver = float(ver_match.group(1))
-                    s += ver * 3  # higher version = better
+                    return float(match.group(1))
                 except ValueError:
                     pass
+            return 0.0
+
+        def score(m: dict) -> float:
+            mid = m.get("id", "").lower()
+            ctx = m.get("context_length", 0)
+            ver = extract_version(mid)
+
+            # Version is king — higher version = newer model
+            s = ver * 100
+
+            # Context window tiebreaker
+            s += ctx / 100_000
+
+            # "pro" and "opus" are the flagship tiers
+            if "pro" in mid:
+                s += 50
+            if "opus" in mid:
+                s += 50
+
+            # Prefer non-preview over preview (slight)
+            if "preview" in mid:
+                s -= 5
 
             return s
 
@@ -201,7 +206,6 @@ class GetModelsTool(BaseTool):
                 m for m in models
                 if m.get("id", "").startswith(f"{prefix}/")
                 and not is_excluded(m.get("id", ""))
-                and is_flagship_family(m.get("id", ""), prefix)
             ]
             candidates.sort(key=score, reverse=True)
             if candidates:

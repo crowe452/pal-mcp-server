@@ -122,25 +122,73 @@ class GetModelsTool(BaseTool):
                     pass
             return []
 
+    # Models that are NOT general-purpose reasoning/coding models
+    EXCLUDE_PATTERNS = [
+        "lyria", "imagen", "music", "audio", "tts", "stt", "whisper",
+        "embed", "moderation", "dall-e", "stable-diffusion",
+        "auto", "router", "openrouter/",  # meta/routing models
+        "vision-only", "ocr",
+    ]
+
+    # Model family keywords that indicate flagship reasoning models
+    FLAGSHIP_KEYWORDS = {
+        "google": ["gemini"],
+        "x-ai": ["grok"],
+        "openai": ["gpt", "o3", "o4"],
+        "anthropic": ["claude"],
+    }
+
     def _pick_frontier(self, models: list[dict]) -> list[dict]:
         """Pick the single best model from each core provider + one wildcard."""
-        # Score each model: prefer large context, recent creation
+
+        def is_excluded(mid: str) -> bool:
+            mid_lower = mid.lower()
+            return any(pat in mid_lower for pat in self.EXCLUDE_PATTERNS)
+
+        def is_flagship_family(mid: str, provider_prefix: str) -> bool:
+            """Check if model belongs to the flagship family for this provider."""
+            mid_lower = mid.lower()
+            keywords = self.FLAGSHIP_KEYWORDS.get(provider_prefix, [])
+            return any(kw in mid_lower for kw in keywords)
+
         def score(m: dict) -> float:
             ctx = m.get("context_length", 0)
             created = m.get("created", 0)
-            # Bonus for large context, recency, and "pro" in name
-            s = ctx / 100_000
-            if created:
-                s += created / 1_000_000_000  # epoch bonus
             name = m.get("id", "").lower()
-            if "pro" in name and "preview" not in name:
-                s += 5
-            elif "pro" in name:
-                s += 3
-            # Penalty for mini/lite/nano/free
+            s = 0.0
+
+            # Context window (normalized)
+            s += ctx / 100_000
+
+            # Recency bonus
+            if created:
+                s += created / 1_000_000_000
+
+            # "opus" is flagship for Anthropic
+            if "opus" in name:
+                s += 20
+
+            # "pro" bonus (but not "preview" penalty — previews are often the latest)
+            if "pro" in name:
+                s += 10
+
+            # Penalty for mini/lite/nano/free/flash variants
             for tag in ["mini", "lite", "nano", "free", "flash"]:
                 if tag in name:
-                    s -= 10
+                    s -= 20
+
+            # Penalty for old version numbers when newer exist
+            # e.g., gpt-5.1 < gpt-5.4, gemini-2.5 < gemini-3.1
+            # Extract version-like numbers
+            import re
+            versions = re.findall(r"(\d+\.?\d*)", name.split("/")[-1])
+            if versions:
+                try:
+                    max_ver = max(float(v) for v in versions)
+                    s += max_ver * 2  # higher version = better
+                except ValueError:
+                    pass
+
             return s
 
         picks = []
@@ -150,7 +198,8 @@ class GetModelsTool(BaseTool):
             candidates = [
                 m for m in models
                 if m.get("id", "").startswith(f"{prefix}/")
-                and "free" not in m.get("id", "").lower()
+                and not is_excluded(m.get("id", ""))
+                and is_flagship_family(m.get("id", ""), prefix)
             ]
             candidates.sort(key=score, reverse=True)
             if candidates:
@@ -158,13 +207,13 @@ class GetModelsTool(BaseTool):
                 picks.append({"label": label, "model": best})
                 used_ids.add(best["id"])
 
-        # Wildcard: best model NOT from core providers
+        # Wildcard: best model NOT from core providers, not a meta-model
         core_prefixes = tuple(f"{p}/" for p, _ in CORE_PROVIDERS)
         wildcards = [
             m for m in models
             if not m.get("id", "").startswith(core_prefixes)
             and m.get("id", "") not in used_ids
-            and "free" not in m.get("id", "").lower()
+            and not is_excluded(m.get("id", ""))
         ]
         wildcards.sort(key=score, reverse=True)
         if wildcards:

@@ -52,6 +52,7 @@ from tools import (  # noqa: E402
     CodeReviewTool,
     ConsensusTool,
     DebugIssueTool,
+    GetModelsTool,
     ThinkDeepTool,
 )
 from tools.models import ToolOutput  # noqa: E402
@@ -153,7 +154,7 @@ server: Server = Server("pal-server")
 
 
 # Constants for tool filtering
-ESSENTIAL_TOOLS = {"version"}
+ESSENTIAL_TOOLS = {"version", "getmodels"}
 
 
 def parse_disabled_tools_env() -> set[str]:
@@ -250,6 +251,7 @@ TOOLS = {
     "consensus": ConsensusTool(),
     "codereview": CodeReviewTool(),
     "debug": DebugIssueTool(),
+    "getmodels": GetModelsTool(),
     "thinkdeep": ThinkDeepTool(),
 }
 TOOLS = filter_disabled_tools(TOOLS)

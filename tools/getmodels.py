@@ -122,36 +122,25 @@ class GetModelsTool(BaseTool):
                     pass
             return []
 
-    # Exclude non-reasoning, non-flagship models
-    # NOTE: These are matched as substrings, so be careful with short patterns.
-    # "mini" can't be used because it matches "ge-mini". Use the regex excluder instead.
+    # Only exclude models that are NOT general-purpose text reasoning models.
+    # We do NOT exclude tiers (sonnet, haiku, flash, mini) — just non-text models.
     EXCLUDE_SUBSTRINGS = [
-        "lyria", "imagen", "music", "audio-", "tts", "stt", "whisper",
-        "embed", "moderation", "dall-e", "stable-diffusion",
-        "/auto", "router", "openrouter/",
-        "vision-only", "ocr", "-image",
-        "-flash", "-lite", "-nano",  # not flagship (dash prefix avoids false positives)
-        "-4o", "4-turbo", "3.5-turbo",  # old OpenAI
-        "gpt-4-", "gpt-3.",  # old generations
-        "grok-3-", "grok-3-", "grok-code",  # old xAI
-        "gemma",  # open weights, not Gemini
-        "-chat", "-codex",  # variant suffixes
-        ":free", ":thinking", ":extended",
-        "-fast",  # speed variants
-        "multi-agent",  # specialized variant
-        "haiku", "sonnet",  # not flagship Anthropic
-        "customtools",  # Google variant suffix
-        "-oss-",  # open source variants
+        "lyria", "imagen", "music", "audio-", "-tts", "-stt", "whisper",
+        "-embed", "moderation", "dall-e", "stable-diffusion",
+        "/auto", "openrouter/",
+        "-image", "-vision",
+        "-ocr",
+        ":free",  # free tier variants on OpenRouter
+        "gemma",  # open weights family, not Gemini
     ]
-    # Regex patterns for more precise matching
-    EXCLUDE_REGEX = [
-        r"-mini(?:\b|$|-)",  # "mini" but NOT "gemini"
-    ]
+    EXCLUDE_REGEX = []  # none needed currently
 
     def _pick_frontier(self, models: list[dict]) -> list[dict]:
-        """Pick the single best model from each core provider + one wildcard.
+        """Pick the newest model from each core provider + top 5 others.
 
-        Strategy: exclude everything that isn't a flagship, then pick highest version.
+        Strategy: exclude non-flagship models, then sort by OpenRouter's
+        `created` timestamp descending. Newest model wins. No custom scoring —
+        OpenRouter's data is the source of truth.
         """
         import re
 
@@ -163,41 +152,6 @@ class GetModelsTool(BaseTool):
                 return True
             return False
 
-        def extract_version(mid: str) -> float:
-            """Extract the primary version number from a model ID."""
-            # Match: gemini-3.1, gpt-5.4, grok-4.20, claude-opus-4.6
-            name = mid.split("/")[-1]
-            match = re.search(r"(\d+\.?\d*)", name)
-            if match:
-                try:
-                    return float(match.group(1))
-                except ValueError:
-                    pass
-            return 0.0
-
-        def score(m: dict) -> float:
-            mid = m.get("id", "").lower()
-            ctx = m.get("context_length", 0)
-            ver = extract_version(mid)
-
-            # Version is king — higher version = newer model
-            s = ver * 100
-
-            # Context window tiebreaker
-            s += ctx / 100_000
-
-            # "pro" and "opus" are the flagship tiers
-            if "pro" in mid:
-                s += 50
-            if "opus" in mid:
-                s += 50
-
-            # Prefer non-preview over preview (slight)
-            if "preview" in mid:
-                s -= 5
-
-            return s
-
         picks = []
         used_ids = set()
 
@@ -207,7 +161,46 @@ class GetModelsTool(BaseTool):
                 if m.get("id", "").startswith(f"{prefix}/")
                 and not is_excluded(m.get("id", ""))
             ]
-            candidates.sort(key=score, reverse=True)
+            # Strategy: extract version family, pick newest family, then best tier within it.
+            # e.g. gpt-5.4-pro and gpt-5.4-nano are same family (5.4), pro wins.
+
+            def version_family(mid: str) -> str:
+                """Extract version family: 'openai/gpt-5.4-pro' -> '5.4'"""
+                name = mid.split("/")[-1]
+                # Match the first version-like number (e.g., 5.4, 3.1, 4.20, 4.6)
+                match = re.search(r"(\d+\.?\d*)", name)
+                return match.group(1) if match else "0"
+
+            def completion_price(m: dict) -> float:
+                """OpenRouter completion price — higher = more capable tier."""
+                try:
+                    return float(m.get("pricing", {}).get("completion", "0"))
+                except (ValueError, TypeError):
+                    return 0.0
+
+            # Group by version family, find the newest family, then pick most expensive in it
+            from collections import defaultdict
+            families = defaultdict(list)
+            for c in candidates:
+                vf = version_family(c["id"])
+                families[vf].append(c)
+
+            # Sort families by max created timestamp (newest family first)
+            sorted_families = sorted(
+                families.items(),
+                key=lambda kv: max(m.get("created", 0) for m in kv[1]),
+                reverse=True,
+            )
+
+            if sorted_families:
+                # Within the newest family, pick the most expensive (= most capable).
+                # Tiebreak: shorter ID = base model (not a variant suffix like -customtools)
+                newest_family = sorted_families[0][1]
+                newest_family.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
+                best = newest_family[0]
+                picks.append({"label": label, "model": best})
+                used_ids.add(best["id"])
+            candidates = []  # clear for next provider
             if candidates:
                 best = candidates[0]
                 picks.append({"label": label, "model": best})
@@ -221,7 +214,7 @@ class GetModelsTool(BaseTool):
             and m.get("id", "") not in used_ids
             and not is_excluded(m.get("id", ""))
         ]
-        others.sort(key=score, reverse=True)
+        others.sort(key=lambda m: m.get("created", 0), reverse=True)
         # Deduplicate by provider prefix (one per provider)
         seen_providers = set()
         for m in others:

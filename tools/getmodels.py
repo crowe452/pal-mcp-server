@@ -128,6 +128,8 @@ class GetModelsTool(BaseTool):
         "embed", "moderation", "dall-e", "stable-diffusion",
         "auto", "router", "openrouter/",  # meta/routing models
         "vision-only", "ocr",
+        "flash", "lite", "nano", "mini",  # not flagship
+        "4o", "4-turbo",  # old OpenAI generation
     ]
 
     # Model family keywords that indicate flagship reasoning models
@@ -172,20 +174,20 @@ class GetModelsTool(BaseTool):
             if "pro" in name:
                 s += 10
 
-            # Penalty for mini/lite/nano/free/flash variants
-            for tag in ["mini", "lite", "nano", "free", "flash"]:
-                if tag in name:
-                    s -= 20
+            # Penalty for free tier
+            if "free" in name:
+                s -= 20
 
-            # Penalty for old version numbers when newer exist
-            # e.g., gpt-5.1 < gpt-5.4, gemini-2.5 < gemini-3.1
-            # Extract version-like numbers
+            # Version scoring: extract model version (not dates)
+            # Match patterns like "gpt-5.4", "gemini-3.1", "grok-4.20", "claude-opus-4.6"
+            # Skip date-like patterns (2024-11-20)
             import re
-            versions = re.findall(r"(\d+\.?\d*)", name.split("/")[-1])
-            if versions:
+            # Look for version after the model family name (e.g., "-5.4", "-3.1", "-4.20")
+            ver_match = re.search(r"(?:gpt-?|gemini-?|grok-?|claude-\w+-?|deepseek-\w+-?)(\d+\.?\d*)", name)
+            if ver_match:
                 try:
-                    max_ver = max(float(v) for v in versions)
-                    s += max_ver * 2  # higher version = better
+                    ver = float(ver_match.group(1))
+                    s += ver * 3  # higher version = better
                 except ValueError:
                     pass
 

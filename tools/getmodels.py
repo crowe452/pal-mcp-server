@@ -136,11 +136,11 @@ class GetModelsTool(BaseTool):
     EXCLUDE_REGEX = []  # none needed currently
 
     def _pick_frontier(self, models: list[dict]) -> list[dict]:
-        """Pick the newest model from each core provider + top 5 others.
+        """Pick the most expensive model from each core provider + top 5 others.
 
-        Strategy: exclude non-flagship models, then sort by OpenRouter's
-        `created` timestamp descending. Newest model wins. No custom scoring —
-        OpenRouter's data is the source of truth.
+        One rule: highest completion price wins. Providers price their best
+        models highest. OpenRouter maintains the pricing. We just sort by it.
+        Tiebreak: shortest model ID (base model over variant suffixes).
         """
         import re
 
@@ -152,8 +152,20 @@ class GetModelsTool(BaseTool):
                 return True
             return False
 
+        def completion_price(m: dict) -> float:
+            try:
+                return float(m.get("pricing", {}).get("completion", "0"))
+            except (ValueError, TypeError):
+                return 0.0
+
         picks = []
         used_ids = set()
+
+        def version_family(mid: str) -> str:
+            """Extract version family: 'openai/gpt-5.4-pro' -> '5.4'"""
+            name = mid.split("/")[-1]
+            match = re.search(r"(\d+\.?\d*)", name)
+            return match.group(1) if match else "0"
 
         for prefix, label in CORE_PROVIDERS:
             candidates = [
@@ -161,52 +173,27 @@ class GetModelsTool(BaseTool):
                 if m.get("id", "").startswith(f"{prefix}/")
                 and not is_excluded(m.get("id", ""))
             ]
-            # Strategy: extract version family, pick newest family, then best tier within it.
-            # e.g. gpt-5.4-pro and gpt-5.4-nano are same family (5.4), pro wins.
-
-            def version_family(mid: str) -> str:
-                """Extract version family: 'openai/gpt-5.4-pro' -> '5.4'"""
-                name = mid.split("/")[-1]
-                # Match the first version-like number (e.g., 5.4, 3.1, 4.20, 4.6)
-                match = re.search(r"(\d+\.?\d*)", name)
-                return match.group(1) if match else "0"
-
-            def completion_price(m: dict) -> float:
-                """OpenRouter completion price — higher = more capable tier."""
-                try:
-                    return float(m.get("pricing", {}).get("completion", "0"))
-                except (ValueError, TypeError):
-                    return 0.0
-
-            # Group by version family, find the newest family, then pick most expensive in it
+            # Group by version family, pick newest family, then most expensive in it
             from collections import defaultdict
             families = defaultdict(list)
             for c in candidates:
-                vf = version_family(c["id"])
-                families[vf].append(c)
+                families[version_family(c["id"])].append(c)
 
-            # Sort families by max created timestamp (newest family first)
-            sorted_families = sorted(
+            # Newest family first (by max created timestamp)
+            sorted_fams = sorted(
                 families.items(),
                 key=lambda kv: max(m.get("created", 0) for m in kv[1]),
                 reverse=True,
             )
-
-            if sorted_families:
-                # Within the newest family, pick the most expensive (= most capable).
-                # Tiebreak: shorter ID = base model (not a variant suffix like -customtools)
-                newest_family = sorted_families[0][1]
-                newest_family.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
-                best = newest_family[0]
-                picks.append({"label": label, "model": best})
-                used_ids.add(best["id"])
-            candidates = []  # clear for next provider
-            if candidates:
-                best = candidates[0]
+            if sorted_fams:
+                # Within newest family: most expensive, then shortest ID
+                fam = sorted_fams[0][1]
+                fam.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
+                best = fam[0]
                 picks.append({"label": label, "model": best})
                 used_ids.add(best["id"])
 
-        # Rest of field: top 5 from other providers
+        # Rest of field: most expensive from other providers (one per provider)
         core_prefixes = tuple(f"{p}/" for p, _ in CORE_PROVIDERS)
         others = [
             m for m in models
@@ -214,8 +201,7 @@ class GetModelsTool(BaseTool):
             and m.get("id", "") not in used_ids
             and not is_excluded(m.get("id", ""))
         ]
-        others.sort(key=lambda m: m.get("created", 0), reverse=True)
-        # Deduplicate by provider prefix (one per provider)
+        others.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
         seen_providers = set()
         for m in others:
             provider = m.get("id", "").split("/")[0]

@@ -207,32 +207,53 @@ class GetModelsTool(BaseTool):
                 picks.append({"label": label, "model": best})
                 used_ids.add(best["id"])
 
-        # Wildcard: best model NOT from core providers, not a meta-model
+        # Rest of field: top 5 from other providers
         core_prefixes = tuple(f"{p}/" for p, _ in CORE_PROVIDERS)
-        wildcards = [
+        others = [
             m for m in models
             if not m.get("id", "").startswith(core_prefixes)
             and m.get("id", "") not in used_ids
             and not is_excluded(m.get("id", ""))
         ]
-        wildcards.sort(key=score, reverse=True)
-        if wildcards:
-            picks.append({"label": "Wildcard", "model": wildcards[0]})
+        others.sort(key=score, reverse=True)
+        # Deduplicate by provider prefix (one per provider)
+        seen_providers = set()
+        for m in others:
+            provider = m.get("id", "").split("/")[0]
+            if provider not in seen_providers:
+                seen_providers.add(provider)
+                picks.append({"label": provider, "model": m, "is_other": True})
+                if len(seen_providers) >= 5:
+                    break
 
         return picks
 
     def _format(self, picks: list[dict]) -> str:
-        """Format picks as a clean table."""
-        lines = ["**Frontier Models (live from OpenRouter)**", ""]
+        """Format picks as frontier labs + others."""
+        frontier = [p for p in picks if not p.get("is_other")]
+        others = [p for p in picks if p.get("is_other")]
+
+        lines = ["**Frontier Labs (live from OpenRouter)**", ""]
         lines.append(f"{'#':<3} {'Provider':<12} {'Model ID':<50} {'Context':>10}")
         lines.append("-" * 78)
 
-        for i, pick in enumerate(picks, 1):
+        for i, pick in enumerate(frontier, 1):
             m = pick["model"]
             mid = m.get("id", "?")
             ctx = m.get("context_length", 0)
             ctx_str = f"{ctx:,}" if ctx else "?"
             lines.append(f"{i:<3} {pick['label']:<12} {mid:<50} {ctx_str:>10}")
+
+        if others:
+            lines.append("")
+            lines.append("**Also Available**")
+            lines.append("-" * 78)
+            for i, pick in enumerate(others, len(frontier) + 1):
+                m = pick["model"]
+                mid = m.get("id", "?")
+                ctx = m.get("context_length", 0)
+                ctx_str = f"{ctx:,}" if ctx else "?"
+                lines.append(f"{i:<3} {pick['label']:<12} {mid:<50} {ctx_str:>10}")
 
         lines.append("")
         lines.append("Pick a number or name a model directly.")

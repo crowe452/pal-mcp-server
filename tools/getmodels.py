@@ -193,7 +193,7 @@ class GetModelsTool(BaseTool):
                 picks.append({"label": label, "model": best})
                 used_ids.add(best["id"])
 
-        # Rest of field: most expensive from other providers (one per provider)
+        # Rest of field: best model from each non-core provider (same logic: newest family + most expensive)
         core_prefixes = tuple(f"{p}/" for p, _ in CORE_PROVIDERS)
         others = [
             m for m in models
@@ -201,15 +201,36 @@ class GetModelsTool(BaseTool):
             and m.get("id", "") not in used_ids
             and not is_excluded(m.get("id", ""))
         ]
-        others.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
-        seen_providers = set()
+
+        # Group by provider, pick the best from each using same family+price logic
+        from collections import defaultdict
+        by_provider = defaultdict(list)
         for m in others:
             provider = m.get("id", "").split("/")[0]
-            if provider not in seen_providers:
-                seen_providers.add(provider)
-                picks.append({"label": provider, "model": m, "is_other": True})
-                if len(seen_providers) >= 5:
-                    break
+            by_provider[provider].append(m)
+
+        provider_picks = []
+        for provider, provider_models in by_provider.items():
+            # Group by version family within this provider
+            families = defaultdict(list)
+            for m in provider_models:
+                families[version_family(m["id"])].append(m)
+
+            # Newest family first
+            sorted_fams = sorted(
+                families.items(),
+                key=lambda kv: max(m.get("created", 0) for m in kv[1]),
+                reverse=True,
+            )
+            if sorted_fams:
+                fam = sorted_fams[0][1]
+                fam.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
+                best = fam[0]
+                provider_picks.append({"label": provider, "model": best, "is_other": True})
+
+        # Sort all provider picks by price descending (best providers float up)
+        provider_picks.sort(key=lambda p: -completion_price(p["model"]))
+        picks.extend(provider_picks[:5])
 
         return picks
 

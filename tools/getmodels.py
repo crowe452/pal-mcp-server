@@ -240,26 +240,27 @@ class GetModelsTool(BaseTool):
         others = [p for p in picks if p.get("is_other")]
 
         lines = ["**Frontier Labs (live from OpenRouter)**", ""]
-        lines.append(f"{'#':<3} {'Provider':<12} {'Model ID':<50} {'Context':>10}")
-        lines.append("-" * 78)
+        lines.append(f"{'#':<3} {'Provider':<12} {'Model':<45} {'Context':>10}")
+        lines.append("-" * 73)
 
         for i, pick in enumerate(frontier, 1):
             m = pick["model"]
-            mid = m.get("id", "?")
+            name = m.get("name", m.get("id", "?"))
             ctx = m.get("context_length", 0)
             ctx_str = f"{ctx:,}" if ctx else "?"
-            lines.append(f"{i:<3} {pick['label']:<12} {mid:<50} {ctx_str:>10}")
+            lines.append(f"{i:<3} {pick['label']:<12} {name:<45} {ctx_str:>10}")
 
         if others:
             lines.append("")
             lines.append("**Also Available**")
-            lines.append("-" * 78)
+            lines.append("-" * 73)
             for i, pick in enumerate(others, len(frontier) + 1):
                 m = pick["model"]
-                mid = m.get("id", "?")
+                name = m.get("name", m.get("id", "?"))
                 ctx = m.get("context_length", 0)
                 ctx_str = f"{ctx:,}" if ctx else "?"
-                lines.append(f"{i:<3} {pick['label']:<12} {mid:<50} {ctx_str:>10}")
+                mid = m.get("id", "")
+                lines.append(f"{i:<3} {name:<45} {ctx_str:>10}  {mid}")
 
         lines.append("")
         lines.append("Pick a number or name a model directly.")

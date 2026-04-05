@@ -52,7 +52,6 @@ from tools import (  # noqa: E402
     CodeReviewTool,
     ConsensusTool,
     DebugIssueTool,
-    ListModelsTool,
     ThinkDeepTool,
 )
 from tools.models import ToolOutput  # noqa: E402
@@ -154,7 +153,7 @@ server: Server = Server("pal-server")
 
 
 # Constants for tool filtering
-ESSENTIAL_TOOLS = {"version", "listmodels"}
+ESSENTIAL_TOOLS = {"version"}
 
 
 def parse_disabled_tools_env() -> set[str]:
@@ -251,7 +250,6 @@ TOOLS = {
     "consensus": ConsensusTool(),
     "codereview": CodeReviewTool(),
     "debug": DebugIssueTool(),
-    "listmodels": ListModelsTool(),
     "thinkdeep": ThinkDeepTool(),
 }
 TOOLS = filter_disabled_tools(TOOLS)
@@ -1443,7 +1441,7 @@ async def main():
     if IS_AUTO_MODE:
         handshake_instructions = (
             "When the user names a specific model (e.g. 'use chat with gpt5'), send that exact model in the tool call. "
-            "When no model is mentioned, first use the `listmodels` tool from PAL to obtain available models to choose the best one from."
+            "When no model is mentioned, use the pre_zen_models hook output (injected automatically) to select the best available model."
         )
     else:
         handshake_instructions = (

@@ -1,8 +1,20 @@
 """
 Get Models tool - Live frontier model lookup from OpenRouter.
 
-Returns the single best model from each of: Google, xAI, OpenAI, Anthropic,
-plus one wildcard pick from any other provider. Five choices, live data.
+Top 4 is strict: positions 1-3 are the three non-Anthropic frontier labs
+(Google, xAI, OpenAI) in that fixed order. Position 4 is a WILDCARD chosen
+from any OTHER provider (not the top 3, not Anthropic) by the same
+newest-family + most-expensive rule used for the core picks.
+
+Why Anthropic is excluded from the top 4: this tool exists so Claude Code
+can reach models OUTSIDE Anthropic. Claude Code already runs Claude, so
+listing Anthropic in a premium slot is dead weight. Anthropic still shows
+up in "Also Available" so it's visible, just not recommended.
+
+The top-4 table has a strict shape (rank / provider / name / slug / context
+/ $/M in / $/M out) so callers can rely on it. The "Also Available"
+section stays flexible.
+
 No stale registry — hits the OpenRouter API directly (1-hour cache).
 """
 
@@ -23,13 +35,18 @@ logger = logging.getLogger(__name__)
 CACHE_FILE = Path("/tmp/openrouter_models_cache.json")
 CACHE_TTL = 3600  # 1 hour
 
-# Providers we always show, in display order
+# Top-3 core providers, in fixed display order. Anthropic is deliberately
+# NOT in this list — see module docstring.
 CORE_PROVIDERS = [
     ("google", "Google"),
     ("x-ai", "xAI"),
     ("openai", "OpenAI"),
-    ("anthropic", "Anthropic"),
 ]
+
+# Providers excluded from the wildcard slot (position 4). Top-3 labs
+# already claim their own slots, and Anthropic is banned from top-4
+# entirely.
+WILDCARD_EXCLUDED_PREFIXES = {"google", "x-ai", "openai", "anthropic"}
 
 
 class GetModelsTool(BaseTool):
@@ -41,8 +58,10 @@ class GetModelsTool(BaseTool):
     def get_description(self) -> str:
         return (
             "Get the latest frontier AI models from OpenRouter. "
-            "Returns 5 picks: the best from Google, xAI, OpenAI, Anthropic, "
-            "plus one wildcard from any other provider. Live data, 1-hour cache."
+            "Top 4: Google, xAI, OpenAI, plus one wildcard from any other "
+            "non-Anthropic provider. Each top-4 row includes model slug and "
+            "pricing so callers can invoke without guessing. Also Available "
+            "lists the rest of the field. Live data, 1-hour cache."
         )
 
     def get_input_schema(self) -> dict[str, Any]:
@@ -135,133 +154,233 @@ class GetModelsTool(BaseTool):
     ]
     EXCLUDE_REGEX = []  # none needed currently
 
-    def _pick_frontier(self, models: list[dict]) -> list[dict]:
-        """Pick the most expensive model from each core provider + top 5 others.
+    @staticmethod
+    def _completion_price(m: dict) -> float:
+        try:
+            return float(m.get("pricing", {}).get("completion", "0"))
+        except (ValueError, TypeError):
+            return 0.0
 
-        One rule: highest completion price wins. Providers price their best
-        models highest. OpenRouter maintains the pricing. We just sort by it.
-        Tiebreak: shortest model ID (base model over variant suffixes).
-        """
+    @staticmethod
+    def _prompt_price(m: dict) -> float:
+        try:
+            return float(m.get("pricing", {}).get("prompt", "0"))
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def _version_family(mid: str) -> str:
+        """Extract version family: 'openai/gpt-5.4-pro' -> '5.4'."""
         import re
+        name = mid.split("/")[-1]
+        match = re.search(r"(\d+\.?\d*)", name)
+        return match.group(1) if match else "0"
 
-        def is_excluded(mid: str) -> bool:
-            mid_lower = mid.lower()
-            if any(pat in mid_lower for pat in self.EXCLUDE_SUBSTRINGS):
-                return True
-            if any(re.search(pat, mid_lower) for pat in self.EXCLUDE_REGEX):
-                return True
-            return False
+    def _is_excluded(self, mid: str) -> bool:
+        import re
+        mid_lower = mid.lower()
+        if any(pat in mid_lower for pat in self.EXCLUDE_SUBSTRINGS):
+            return True
+        if any(re.search(pat, mid_lower) for pat in self.EXCLUDE_REGEX):
+            return True
+        return False
 
-        def completion_price(m: dict) -> float:
-            try:
-                return float(m.get("pricing", {}).get("completion", "0"))
-            except (ValueError, TypeError):
-                return 0.0
+    def _best_in_pool(self, pool: list[dict]) -> Optional[dict]:
+        """Pick the flagship model from a candidate pool.
 
-        picks = []
-        used_ids = set()
+        Rule: group by version family, take newest family (by max created
+        timestamp), then within that family pick highest completion price,
+        tiebreak on shortest model id (prefers base model over suffixed
+        variants). Returns None if pool is empty.
+        """
+        from collections import defaultdict
 
-        def version_family(mid: str) -> str:
-            """Extract version family: 'openai/gpt-5.4-pro' -> '5.4'"""
-            name = mid.split("/")[-1]
-            match = re.search(r"(\d+\.?\d*)", name)
-            return match.group(1) if match else "0"
+        if not pool:
+            return None
+        families = defaultdict(list)
+        for c in pool:
+            families[self._version_family(c.get("id", ""))].append(c)
+        sorted_fams = sorted(
+            families.items(),
+            key=lambda kv: max(m.get("created", 0) for m in kv[1]),
+            reverse=True,
+        )
+        if not sorted_fams:
+            return None
+        fam = sorted_fams[0][1]
+        fam.sort(key=lambda m: (-self._completion_price(m), len(m.get("id", ""))))
+        return fam[0]
 
+    def _pick_frontier(self, models: list[dict]) -> list[dict]:
+        """Pick the top-4 + the rest of the field.
+
+        Top 4 is strict: Google, xAI, OpenAI, then one wildcard from any
+        other non-Anthropic provider. The wildcard is whichever non-core
+        non-Anthropic provider has the highest-priced flagship. Anthropic
+        is deliberately excluded from the top-4 pool.
+
+        The rest of the field ("Also Available") includes Anthropic and
+        every other provider with an eligible flagship, sorted by price
+        descending, capped at 5.
+        """
+        from collections import defaultdict
+
+        picks: list[dict] = []
+        used_ids: set[str] = set()
+
+        # Positions 1-3: the three core frontier labs in fixed order
         for prefix, label in CORE_PROVIDERS:
-            candidates = [
+            pool = [
                 m for m in models
                 if m.get("id", "").startswith(f"{prefix}/")
-                and not is_excluded(m.get("id", ""))
+                and not self._is_excluded(m.get("id", ""))
             ]
-            # Group by version family, pick newest family, then most expensive in it
-            from collections import defaultdict
-            families = defaultdict(list)
-            for c in candidates:
-                families[version_family(c["id"])].append(c)
-
-            # Newest family first (by max created timestamp)
-            sorted_fams = sorted(
-                families.items(),
-                key=lambda kv: max(m.get("created", 0) for m in kv[1]),
-                reverse=True,
-            )
-            if sorted_fams:
-                # Within newest family: most expensive, then shortest ID
-                fam = sorted_fams[0][1]
-                fam.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
-                best = fam[0]
-                picks.append({"label": label, "model": best})
+            best = self._best_in_pool(pool)
+            if best is not None:
+                picks.append({"label": label, "model": best, "slot": "core"})
                 used_ids.add(best["id"])
+            else:
+                # No eligible model — leave a placeholder slot so the
+                # table still has 4 rows and callers can see the gap.
+                picks.append({"label": label, "model": None, "slot": "core"})
 
-        # Rest of field: best model from each non-core provider (same logic: newest family + most expensive)
+        # Build provider → flagship map for everything outside the top-3
+        # (includes Anthropic; we filter Anthropic out later just for the
+        # wildcard slot).
         core_prefixes = tuple(f"{p}/" for p, _ in CORE_PROVIDERS)
-        others = [
-            m for m in models
-            if not m.get("id", "").startswith(core_prefixes)
-            and m.get("id", "") not in used_ids
-            and not is_excluded(m.get("id", ""))
-        ]
-
-        # Group by provider, pick the best from each using same family+price logic
-        from collections import defaultdict
-        by_provider = defaultdict(list)
-        for m in others:
-            provider = m.get("id", "").split("/")[0]
+        by_provider: dict[str, list[dict]] = defaultdict(list)
+        for m in models:
+            mid = m.get("id", "")
+            if mid in used_ids:
+                continue
+            if mid.startswith(core_prefixes):
+                continue
+            if self._is_excluded(mid):
+                continue
+            provider = mid.split("/")[0]
             by_provider[provider].append(m)
 
-        provider_picks = []
-        for provider, provider_models in by_provider.items():
-            # Group by version family within this provider
-            families = defaultdict(list)
-            for m in provider_models:
-                families[version_family(m["id"])].append(m)
+        provider_flagships: list[dict] = []
+        for provider, pool in by_provider.items():
+            best = self._best_in_pool(pool)
+            if best is not None:
+                provider_flagships.append({"label": provider, "model": best})
 
-            # Newest family first
-            sorted_fams = sorted(
-                families.items(),
-                key=lambda kv: max(m.get("created", 0) for m in kv[1]),
-                reverse=True,
-            )
-            if sorted_fams:
-                fam = sorted_fams[0][1]
-                fam.sort(key=lambda m: (-completion_price(m), len(m.get("id", ""))))
-                best = fam[0]
-                provider_picks.append({"label": provider, "model": best, "is_other": True})
+        # Position 4: highest-priced non-core non-Anthropic flagship
+        wildcard_pool = [
+            p for p in provider_flagships
+            if p["label"].lower() not in WILDCARD_EXCLUDED_PREFIXES
+        ]
+        wildcard_pool.sort(key=lambda p: -self._completion_price(p["model"]))
+        if wildcard_pool:
+            wc = wildcard_pool[0]
+            picks.append({
+                "label": wc["label"],
+                "model": wc["model"],
+                "slot": "wildcard",
+            })
+            used_ids.add(wc["model"].get("id", ""))
+        else:
+            picks.append({"label": "Wildcard", "model": None, "slot": "wildcard"})
 
-        # Sort all provider picks by price descending (best providers float up)
-        provider_picks.sort(key=lambda p: -completion_price(p["model"]))
-        picks.extend(provider_picks[:5])
+        # "Also Available": every other flagship (including Anthropic) by
+        # price descending, capped at 5, excluding whatever already
+        # landed in the top 4.
+        others = [
+            {"label": p["label"], "model": p["model"], "slot": "other"}
+            for p in provider_flagships
+            if p["model"].get("id", "") not in used_ids
+        ]
+        others.sort(key=lambda p: -self._completion_price(p["model"]))
+        picks.extend(others[:5])
 
         return picks
 
     def _format(self, picks: list[dict]) -> str:
-        """Format picks as frontier labs + others."""
-        frontier = [p for p in picks if not p.get("is_other")]
-        others = [p for p in picks if p.get("is_other")]
+        """Render picks as a strict top-4 table + flexible "Also Available".
 
-        lines = ["**Frontier Labs (live from OpenRouter)**", ""]
-        lines.append(f"{'#':<3} {'Provider':<12} {'Model':<45} {'Context':>10}")
-        lines.append("-" * 73)
+        The top-4 table shape is LOAD-BEARING — callers parse it to pick a
+        model. Columns: rank, provider, name, slug, context, $/M in, $/M
+        out. The "Also Available" section is free-form and can evolve.
+        """
+        top = [p for p in picks if p.get("slot") in ("core", "wildcard")]
+        others = [p for p in picks if p.get("slot") == "other"]
 
-        for i, pick in enumerate(frontier, 1):
-            m = pick["model"]
-            name = m.get("name", m.get("id", "?"))
+        def fmt_ctx(m: Optional[dict]) -> str:
+            if not m:
+                return "—"
             ctx = m.get("context_length", 0)
-            ctx_str = f"{ctx:,}" if ctx else "?"
-            lines.append(f"{i:<3} {pick['label']:<12} {name:<45} {ctx_str:>10}")
+            return f"{ctx:,}" if ctx else "?"
+
+        def fmt_price_per_mtok(price_per_token: float) -> str:
+            """OpenRouter prices are per-token as strings. Convert to $/M."""
+            if price_per_token <= 0:
+                return "—"
+            per_m = price_per_token * 1_000_000
+            if per_m >= 100:
+                return f"${per_m:.0f}"
+            if per_m >= 10:
+                return f"${per_m:.1f}"
+            return f"${per_m:.2f}"
+
+        # Column widths tuned so the table renders cleanly in a mono font
+        # without wrapping on an 80-col terminal most of the time. Callers
+        # should not rely on exact widths — only on column order.
+        lines: list[str] = []
+        lines.append("**Top 4 (live from OpenRouter)**")
+        lines.append("")
+        header = (
+            f"{'#':<2} {'Provider':<11} {'Model':<34} "
+            f"{'Slug':<36} {'Context':>10} {'$/Min':>7} {'$/Mout':>7}"
+        )
+        lines.append(header)
+        lines.append("-" * len(header))
+
+        for i, pick in enumerate(top, 1):
+            m = pick.get("model")
+            label = pick.get("label", "?")
+            if pick.get("slot") == "wildcard":
+                # Title-case the bare provider prefix ("perplexity" -> "Perplexity"),
+                # then mark with * so callers see it's the floating slot.
+                label = "*" + label[:1].upper() + label[1:]
+            if len(label) > 11:
+                label = label[:11]
+            if m is None:
+                lines.append(
+                    f"{i:<2} {label:<11} {'(none available)':<34} "
+                    f"{'—':<36} {'—':>10} {'—':>7} {'—':>7}"
+                )
+                continue
+            name = m.get("name", m.get("id", "?"))
+            slug = m.get("id", "?")
+            ctx_str = fmt_ctx(m)
+            p_in = fmt_price_per_mtok(self._prompt_price(m))
+            p_out = fmt_price_per_mtok(self._completion_price(m))
+            # Truncate name/slug if they'd blow the column, but keep slug
+            # intact — it's the load-bearing field. Name is cosmetic.
+            if len(name) > 34:
+                name = name[:33] + "…"
+            lines.append(
+                f"{i:<2} {label:<11} {name:<34} "
+                f"{slug:<36} {ctx_str:>10} {p_in:>7} {p_out:>7}"
+            )
+
+        lines.append("")
+        lines.append("`*` = wildcard slot (floats to whichever non-core provider has the priciest flagship).")
+        lines.append("Prices shown are $/M tokens (input / output). Context is in tokens.")
 
         if others:
             lines.append("")
             lines.append("**Also Available**")
-            lines.append("-" * 73)
-            for i, pick in enumerate(others, len(frontier) + 1):
+            lines.append("")
+            for i, pick in enumerate(others, len(top) + 1):
                 m = pick["model"]
                 name = m.get("name", m.get("id", "?"))
-                ctx = m.get("context_length", 0)
-                ctx_str = f"{ctx:,}" if ctx else "?"
-                mid = m.get("id", "")
-                lines.append(f"{i:<3} {name:<45} {ctx_str:>10}  {mid}")
+                slug = m.get("id", "?")
+                ctx_str = fmt_ctx(m)
+                p_out = fmt_price_per_mtok(self._completion_price(m))
+                lines.append(f"{i}. {name} — `{slug}` ({ctx_str} ctx, {p_out}/Mout)")
 
         lines.append("")
-        lines.append("Pick a number or name a model directly.")
+        lines.append("Pick a model by slug (e.g. `openai/gpt-5.4-pro`) when calling zen chat / thinkdeep.")
         return "\n".join(lines)

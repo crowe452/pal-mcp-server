@@ -50,7 +50,11 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             api_key: OpenRouter API key
             **kwargs: Additional configuration
         """
-        base_url = "https://openrouter.ai/api/v1"
+        # Allow overriding the base URL via env var so callers can route
+        # through a proxy / AI Gateway (e.g. Cloudflare AI Gateway's
+        # OpenRouter endpoint) for observability + caching without touching
+        # code. Default preserves the original direct-to-OpenRouter behaviour.
+        base_url = get_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self._alias_cache: dict[str, str] = {}
         super().__init__(api_key, base_url=base_url, **kwargs)
 
